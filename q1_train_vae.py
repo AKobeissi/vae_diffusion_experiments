@@ -77,10 +77,14 @@ optimizer = optim.Adam(model.parameters(), lr=1e-3)
 def loss_function(recon_x, x, mu, logvar):
     ## TO DO: Implement the loss function using your functions from q1_solution.py
     ## use the following structure:
-    # kl = kl_gaussian_gaussian_analytic(mu_q=?, logvar_q=?, mu_p=?, logvar_p=?).sum()
-    # recon_loss = (?).sum()
-    # return recon_loss + kl
-    raise notImplementedError("Implement the loss function using your functions from q1_solution.py")
+    x_flat = x.view(x.size(0), -1)
+    # Bernoulli reconstruction loss (negative log-likelihood)
+    recon_loss = -log_likelihood_bernoulli(recon_x, x_flat).sum()
+    # KL divergence to standard normal
+    kl = kl_gaussian_gaussian_analytic(mu, logvar,
+                                       torch.zeros_like(mu),
+                                       torch.zeros_like(logvar)).sum()
+    return recon_loss + kl
 
 def train(epoch):
     model.train()

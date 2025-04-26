@@ -125,12 +125,14 @@ class Trainer:
                 device=self.args.device,
             )
             if self.args.nb_save is not None:
-                saving_steps = [self.args["n_steps"] - 1]
-            # Remove noise for $T$ steps
+                saving_steps = [self.args.n_steps - 1]
+            
+            # Reverse diffusion process
             for t_ in tqdm(range(n_steps)):
-                
-                # TODO: Sample x_t 
-                raise NotImplementedError
+                # We go from t=T-1 to t=0
+                t = torch.full((self.args.n_samples,), n_steps - 1 - t_, device=self.args.device, dtype=torch.long)
+                # Get x_{t-1} from p_theta(x_{t-1}|x_t)
+                x = self.diffusion.p_sample(x, t)
             
                 if self.args.nb_save is not None and t_ in saving_steps:
                     print(f"Showing/saving samples from epoch {self.current_epoch}")
@@ -168,13 +170,15 @@ class Trainer:
         plt.close(fig)
         
         
-    def generate_intermediate_samples(self, n_samples=4, img_size=32, steps_to_show=[0,999], n_steps=None, set_seed=False):
+    def generate_intermediate_samples(self, model=None, n_samples=4, img_size=32, steps_to_show=[0,999], n_steps=None, set_seed=False):
         """
         Generate multiple images and return intermediate steps of the diffusion process
         Args:
+            model: The trained diffusion model (unused parameter for compatibility)
             n_samples: Number of images to generate
             img_size: Size of the images (assumes square images)
-            every_n_steps: Capture intermediate result every n steps
+            steps_to_show: Steps at which to capture the intermediate results
+            n_steps: Total number of diffusion steps
         Returns:
             List of tensors representing the images at different steps
         """
@@ -192,13 +196,16 @@ class Trainer:
         images = []
         images.append(x.detach().cpu().numpy())  # Initial noise
 
-        for step in tqdm(range(1, n_steps+1, 1)):
-            # TODO: Generate intermediate steps
-            # Hint: if GPU crashes, it might be because you accumulate unused gradient ... don't forget to remove gradient
-            raise NotImplementedError
-        
-            # Store intermediate result if it's a step we want to display
-            if step in steps_to_show:
-                images.append(x.detach().cpu().numpy())
+        with torch.no_grad():
+            for step in tqdm(range(1, n_steps+1, 1)):
+                # Calculate the time step in the reverse process (going from T to 0)
+                t = torch.full((n_samples,), n_steps - step, device=args.device, dtype=torch.long)
+                
+                # Sample from the model
+                x = self.diffusion.p_sample(x, t)
+            
+                # Store intermediate result if it's a step we want to display
+                if step in steps_to_show:
+                    images.append(x.detach().cpu().numpy())
 
         return images

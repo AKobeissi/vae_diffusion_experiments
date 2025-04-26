@@ -48,6 +48,10 @@ class EMA:
         ema_model.load_state_dict(model.state_dict())
 
 
+import copy 
+import numpy as np 
+from q3_trainer_cfg import * 
+
 class Trainer:
     def __init__(self, args, eps_model, diffusion_model):
 
@@ -89,8 +93,6 @@ class Trainer:
                 scaler.scale(loss).backward()
                 scaler.step(self.optimizer)
                 scaler.update()
-                loss.backward()
-                self.optimizer.step()
                 self.ema.step_ema(self.ema_model, self.eps_model)
 
                 running_loss += loss.item()
@@ -117,57 +119,98 @@ class Trainer:
                 if (current_epoch + 1) % self.args.save_every_n_epochs == 0:
                     self.save_model()
     
-    def sample(self, labels=None, cfg_scale=3., n_steps=None, set_seed=False):
+    def sample(self, labels=None, cfg_scale=3.0, n_steps=None, set_seed=False):
         if set_seed:
             torch.manual_seed(42)
+
         if n_steps is None:
             n_steps = self.args.n_steps
-            
-        self.eps_model.eval()
-            
-        with torch.no_grad():
-    
-            z_t = torch.randn(
-                        [
-                            self.args.n_samples,
-                            self.args.image_channels,
-                            self.args.image_size,
-                            self.args.image_size,
-                        ],
-                        device=self.args.device
-                    )
-            
-            if labels == None:
-                labels = torch.randint(0, 9, (self.args.n_samples,), device=self.args.device)
-                
-            if self.args.nb_save is not None:
-                saving_steps = [self.args["n_steps"] - 1]
-            
-            # Remove noise for $T$ steps
-            for t_ in tqdm(range(n_steps)):
-            
-                t = n_steps - t_ - 1
-                t = torch.full((self.args.n_samples,), t, device=z_t.device, dtype=torch.long)
-                
-                #TODO: Get lambda and lambda prim based on t 
-                raise NotImplementedError
-                
-                #TODO: Add linear interpolation between unconditional and conditional preidiction according to 3 in Algo. 2 using cfg_scale
-                raise NotImplementedError
-                    
-                #TODO: Get x_t then sample z_t from the reverse process according to 4. and 5. in Algo 2.
-                raise NotImplementedError
 
-                if self.args.nb_save is not None and t_ in saving_steps:
-                    print(f"Showing/saving samples from epoch {self.current_epoch} with labels: {labels.tolist()}")
-                    show_save(
-                        x_t,
-                        labels,
-                        show=True,
-                        save=True,
-                        file_name=f"DDPM_epoch_{self.current_epoch}_sample_{t_}.png",
+        self.eps_model.eval()
+
+        with torch.no_grad():
+            # 1) start from pure noise
+            z_t = torch.randn(
+                self.args.n_samples,
+                self.args.image_channels,
+                self.args.image_size,
+                self.args.image_size,
+                device=self.args.device,
+            )
+
+            # 2) if no labels provided, sample them uniformly
+            if labels is None:
+                labels = torch.randint(
+                    0, self.args.num_classes,
+                    (self.args.n_samples,),
+                    device=self.args.device,
+                )
+
+            # 3) determine which timesteps to save images at
+            if self.args.nb_save is not None:
+                saving_steps = [n_steps - 1]
+
+            # ancestral sampling from t = n_steps … 1
+            for t_ in tqdm(range(n_steps), desc="sampling"):
+                # current discrete time index
+                cur = n_steps - t_ - 1
+                t = torch.full(
+                    (self.args.n_samples,),
+                    cur,
+                    device=self.args.device,
+                    dtype=torch.long
+                )
+
+                # --- TODO #1: get λ_t and λ_{t-1} ---
+                lambda_t     = self.diffusion.get_lambda(t)
+                if cur > 0:
+                    t_prev      = torch.full(
+                        (self.args.n_samples,),
+                        cur - 1,
+                        device=self.args.device,
+                        dtype=torch.long
                     )
-            self.eps_model.train()
+                    lambda_prev = self.diffusion.get_lambda(t_prev)
+                else:
+                    # at the last step, we won’t call p_sample
+                    lambda_prev = None
+
+                # --- TODO #2: classifier‑free guided ε ---
+                #  ε_cond = ε_model(z_t, labels)
+                eps_cond   = self.eps_model(z_t, labels)
+                #  ε_uncond = ε_model(z_t, None)
+                eps_uncond = self.eps_model(z_t, None)
+                #  ε̃ = (1+w) ε_cond – w ε_uncond
+                eps_guided = (1.0 + cfg_scale) * eps_cond - cfg_scale * eps_uncond
+
+                # --- compute x̃_{t-1} = (z_t – σ_{λ_t} ε̃) / α_{λ_t} ---
+                alpha_t = self.diffusion.alpha_lambda(lambda_t)
+                sigma_t = self.diffusion.sigma_lambda(lambda_t)
+                x_t     = (z_t - sigma_t * eps_guided) / alpha_t
+
+                # --- TODO #3: reverse sample to get z_{t-1} ---
+                if cur > 0:
+                    # sample from p_θ(z_{t-1} | z_t, x̃_{t-1})
+                    z_t = self.diffusion.p_sample(
+                        z_lambda_t=z_t,
+                        lambda_t=lambda_t,
+                        lambda_t_prim=lambda_prev,
+                        x_t=x_t,
+                    )
+                else:
+                    # at final step we simply take x_0 = x̃_0
+                    z_t = x_t
+
+                # optionally save/show
+                if self.args.nb_save is not None and t_ in saving_steps:
+                    print(f"Saving samples at step {cur}, labels={labels.tolist()}")
+                    show_save(
+                        x_t, labels,
+                        show=True, save=True,
+                        file_name=f"DDPM_epoch_{self.current_epoch}_step_{cur}.png"
+                    )
+
+        self.eps_model.train()
         return x_t
 
     def save_model(self):
@@ -176,6 +219,7 @@ class Trainer:
                 'model_state_dict': self.eps_model.state_dict(),
                 'optimizer_state_dict': self.optimizer.state_dict(),
                 }, self.args.MODEL_PATH)
+    
     
 def show_save(img_tensor, labels=None, show=True, save=True, file_name="sample.png"):
     fig, axs = plt.subplots(3, 3, figsize=(10, 10))  # Create a 4x4 grid of subplots
